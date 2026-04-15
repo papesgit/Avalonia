@@ -100,6 +100,8 @@ namespace Avalonia.Win32
         private Size _minSize;
         private Size _maxSize;
         private POINT _maxTrackSize;
+        private WinScreen? _captionlessMaximizeScreen;
+        private PixelRect? _lastNormalWindowRect;
         private WindowImpl? _parent;
         private bool _isCloseRequested;
         private bool _shown;

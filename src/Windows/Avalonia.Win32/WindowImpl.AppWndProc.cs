@@ -786,6 +786,7 @@ namespace Avalonia.Win32
 
                 case WindowsMessage.WM_MOVE:
                     {
+                        UpdateLastNormalWindowRect();
                         PositionChanged?.Invoke(Position);
                         return IntPtr.Zero;
                     }
@@ -799,16 +800,24 @@ namespace Avalonia.Win32
                         // A window without a caption (i.e. None and BorderOnly decorations) maximizes to the whole screen
                         // by default. Adjust that to the screen's working area instead.
                         var style = GetStyle();
-                        if (!style.HasAllFlags(WindowStyles.WS_CAPTION | WindowStyles.WS_THICKFRAME) &&
-                            Screen.ScreenFromHwnd(Hwnd, MONITOR.MONITOR_DEFAULTTONEAREST) is { } screen)
+                        if (!style.HasAllFlags(WindowStyles.WS_CAPTION | WindowStyles.WS_THICKFRAME))
                         {
-                            var maximizedRect = GetCaptionlessMaximizedRect(style, screen.WorkingArea);
-                            // We aren't changing ptMaxPosition because its coordinates must always target the primary screen.
-                            // We can't do that, since the work area might not be the same for all screens.
-                            // Instead, only set the desired max size here.
-                            // WM_WINDOWPOSCHANGING moves the window to the correct position.
-                            mmi.ptMaxSize.X = maximizedRect.Width;
-                            mmi.ptMaxSize.Y = maximizedRect.Height;
+                            _captionlessMaximizeScreen = GetCaptionlessMaximizeScreen();
+
+                            if (_captionlessMaximizeScreen is { } screen)
+                            {
+                                var maximizedRect = GetCaptionlessMaximizedRect(style, screen.WorkingArea);
+                                // We aren't changing ptMaxPosition because its coordinates must always target the primary screen.
+                                // We can't do that, since the work area might not be the same for all screens.
+                                // Instead, only set the desired max size here.
+                                // WM_WINDOWPOSCHANGING moves the window to the correct position.
+                                mmi.ptMaxSize.X = maximizedRect.Width;
+                                mmi.ptMaxSize.Y = maximizedRect.Height;
+                            }
+                        }
+                        else
+                        {
+                            _captionlessMaximizeScreen = null;
                         }
 
                         if (_minSize.Width > 0)
@@ -852,10 +861,14 @@ namespace Avalonia.Win32
                             !_isFullScreenActive &&
                             !flags.HasAllFlags(SetWindowPosFlags.SWP_NOMOVE | SetWindowPosFlags.SWP_NOSIZE))
                         {
-                            // Prefer ScreenFromRect as it contains the new position.
-                            // If the window was minimized, ScreenFromHwnd won't return the correct monitor at this point.
-                            var screen = Screen.ScreenFromRect(new PixelRect(pos->x, pos->y, pos->cx, pos->cy))
-                                ?? Screen.ScreenFromHwnd(Hwnd, MONITOR.MONITOR_DEFAULTTONEAREST);
+                            // During a captionless maximize, WINDOWPOS can contain primary-screen-relative
+                            // coordinates combined with the target screen's size. Using that rect to choose
+                            // the screen can select the primary monitor when the target monitor has a
+                            // different work area or is vertically offset. Prefer the real screen occupied
+                            // by the normal window before Windows rewrites the maximize position.
+                            var screen = _captionlessMaximizeScreen
+                                ?? GetCaptionlessMaximizeScreen()
+                                ?? (Screen.ScreenFromRect(new PixelRect(pos->x, pos->y, pos->cx, pos->cy)) as WinScreen);
 
                             if (screen is not null)
                             {
@@ -872,6 +885,7 @@ namespace Avalonia.Win32
 
                 case WindowsMessage.WM_DISPLAYCHANGE:
                     {
+                        _lastNormalWindowRect = null;
                         Screen?.OnChanged();
                         return IntPtr.Zero;
                     }
@@ -949,6 +963,9 @@ namespace Avalonia.Win32
                     break;
                 case WindowsMessage.WM_WINDOWPOSCHANGED:
                     var winPos = Marshal.PtrToStructure<WINDOWPOS>(lParam);
+                    UpdateLastNormalWindowRect();
+                    _captionlessMaximizeScreen = null;
+
                     if ((winPos.flags & (uint)SetWindowPosFlags.SWP_SHOWWINDOW) != 0)
                     {
                         OnShowHideMessage(true);
@@ -1034,6 +1051,42 @@ namespace Avalonia.Win32
             cy += -borderThickness.top + borderThickness.bottom;
 
             return new PixelRect(x, y, cx, cy);
+        }
+
+        private WinScreen? GetCaptionlessMaximizeScreen()
+        {
+            return GetLastNormalWindowScreen()
+                ?? GetCurrentWindowScreen();
+        }
+
+        private WinScreen? GetCurrentWindowScreen()
+        {
+            GetWindowRect(_hwnd, out var windowRect);
+
+            return Screen.ScreenFromRect(windowRect.ToPixelRect()) as WinScreen
+                ?? Screen.ScreenFromHwnd(_hwnd, MONITOR.MONITOR_DEFAULTTONEAREST);
+        }
+
+        private WinScreen? GetLastNormalWindowScreen()
+        {
+            return _lastNormalWindowRect is { } rect
+                ? Screen.ScreenFromRect(rect) as WinScreen
+                : null;
+        }
+
+        private void UpdateLastNormalWindowRect()
+        {
+            var style = GetStyle();
+
+            if (_captionlessMaximizeScreen is not null ||
+                _isFullScreenActive ||
+                (style & (WindowStyles.WS_MAXIMIZE | WindowStyles.WS_MINIMIZE)) != 0)
+            {
+                return;
+            }
+
+            GetWindowRect(_hwnd, out var windowRect);
+            _lastNormalWindowRect = windowRect.ToPixelRect();
         }
 
         internal bool IsOurWindow(IntPtr hwnd)
